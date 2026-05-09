@@ -11,7 +11,6 @@ app = Flask(__name__)
 
 REGISTRATION = "FA23-BAI-001"
 NEWS_SOURCE = "DAWN News Pakistan"
-DAWN_SEARCH_URL = "https://www.dawn.com/search?q={keyword}"
 
 def get_chrome_driver():
     options = Options()
@@ -29,50 +28,96 @@ def get_chrome_driver():
     driver = webdriver.Chrome(options=options)
     return driver
 
-def summarize(text, num_sentences=3):
-    """Simple extractive summarizer — no external API needed."""
+def summarize(text, num_sentences=4):
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
-    return " ".join(sentences[:num_sentences]) if sentences else text[:500]
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 40]
+    return " ".join(sentences[:num_sentences]) if sentences else text[:600]
 
 def scrape_dawn(keyword):
     driver = get_chrome_driver()
     result_url = ""
-    summary = ""
+    summary = "Could not extract summary."
 
     try:
-        search_url = DAWN_SEARCH_URL.format(keyword=keyword)
+        # Use DAWN search
+        search_url = f"https://www.dawn.com/search?q={keyword}&sort=date"
+        print(f"[INFO] Searching: {search_url}")
         driver.get(search_url)
-        wait = WebDriverWait(driver, 15)
+        time.sleep(4)
 
-        # Wait for search results and grab first article link
-        first_link = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "article a, .story__link, h2 a, .search-result a")
-            )
-        )
-        result_url = first_link.get_attribute("href")
-        if result_url and not result_url.startswith("http"):
-            result_url = "https://www.dawn.com" + result_url
+        # Find all links on the search results page
+        links = driver.find_elements(By.TAG_NAME, "a")
+        article_url = None
 
-        # Now visit the article
+        for link in links:
+            href = link.get_attribute("href") or ""
+            # DAWN article URLs follow pattern: dawn.com/news/XXXXXXX
+            if re.match(r'https://www\.dawn\.com/news/\d+', href):
+                article_url = href
+                print(f"[INFO] Found article: {article_url}")
+                break
+
+        if not article_url:
+            # Fallback: try google search for dawn.com
+            driver.get(f"https://www.google.com/search?q=site:dawn.com+{keyword}")
+            time.sleep(3)
+            links = driver.find_elements(By.CSS_SELECTOR, "a")
+            for link in links:
+                href = link.get_attribute("href") or ""
+                if "dawn.com/news/" in href and "google" not in href:
+                    article_url = href
+                    break
+
+        if not article_url:
+            return search_url, "No article found for this keyword."
+
+        result_url = article_url
+
+        # Visit the article page
+        print(f"[INFO] Visiting article: {result_url}")
         driver.get(result_url)
-        time.sleep(3)
+        time.sleep(4)
 
-        # Extract article body text
-        paragraphs = driver.find_elements(By.CSS_SELECTOR, "article p, .story__content p, .template-story p")
-        full_text = " ".join([p.text for p in paragraphs if p.text.strip()])
+        # Try multiple selectors for DAWN article body
+        content_selectors = [
+            "div.template-story__body p",
+            "div.story__content p",
+            "article p",
+            "div.content-area p",
+            "section.story p",
+            "div#article-content p",
+        ]
 
+        full_text = ""
+        for selector in content_selectors:
+            paragraphs = driver.find_elements(By.CSS_SELECTOR, selector)
+            text = " ".join([
+                p.text.strip() for p in paragraphs
+                if len(p.text.strip()) > 40
+            ])
+            if len(text) > 200:
+                full_text = text
+                print(f"[INFO] Got text using selector: {selector} ({len(text)} chars)")
+                break
+
+        # Last resort fallback
         if not full_text:
-            # Fallback: grab all p tags
-            paragraphs = driver.find_elements(By.TAG_NAME, "p")
-            full_text = " ".join([p.text for p in paragraphs if len(p.text.strip()) > 40])
+            all_p = driver.find_elements(By.TAG_NAME, "p")
+            full_text = " ".join([
+                p.text.strip() for p in all_p
+                if len(p.text.strip()) > 40
+            ])
+            print(f"[INFO] Fallback p tag text: {len(full_text)} chars")
 
-        summary = summarize(full_text)
+        if full_text:
+            summary = summarize(full_text)
+        else:
+            summary = "Article found but content could not be extracted."
 
     except Exception as e:
-        summary = f"Error during scraping: {str(e)}"
-        result_url = result_url or DAWN_SEARCH_URL.format(keyword=keyword)
+        print(f"[ERROR] {str(e)}")
+        summary = f"Scraping error: {str(e)}"
+        result_url = result_url or f"https://www.dawn.com/search?q={keyword}"
     finally:
         driver.quit()
 
@@ -85,6 +130,7 @@ def get_news():
     if not keyword:
         return jsonify({"error": "keyword parameter is required"}), 400
 
+    print(f"[REQUEST] keyword={keyword}")
     url, summary = scrape_dawn(keyword)
 
     return jsonify({
